@@ -120,7 +120,7 @@ const mockTokenData = {
 const mockNetworkStats = {
   pendingTransactions: 32,
   networkStatus: 'healthy', // 'healthy', 'warning', 'critical'
-  liveTPS: 10.5,
+  liveTPS: 8055,
   nextBlockIn: 12, // seconds
   lastBlockConfirmationTime: 0.8, // seconds
   averageGasFee: 0.00023, // ZTAC

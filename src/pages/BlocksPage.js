@@ -5,6 +5,7 @@ import {
   Layers, Clock, Database, ArrowRight, ChevronLeft, ChevronRight, 
   Search, RefreshCw, Filter
 } from 'lucide-react';
+import ztaccApiService from '../services/ztaccApiService';
 
 // Generate mock block data
 const generateMockBlocks = (count = 20) => {
@@ -25,7 +26,7 @@ const generateMockBlocks = (count = 20) => {
       gasLimit: 10000000,
       validator: `0x${Math.random().toString(16).substring(2, 42)}`,
       reward: (Math.random() * 0.05).toFixed(5),
-      accessEvents: Math.floor(Math.random() * 50),
+      totalFees: (Math.random() * 50).toFixed(2), // Total fees from transactions
     });
   }
   
@@ -36,42 +37,161 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
   const navigate = useNavigate();
   const [blocks, setBlocks] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [allBlocks, setAllBlocks] = useState([]); // Store all blocks for pagination
+  const blocksPerPage = 20; // Number of blocks per page
+  
+  // Get blocks for current page
+  const getCurrentPageBlocks = () => {
+    const startIndex = (currentPage - 1) * blocksPerPage;
+    const endIndex = startIndex + blocksPerPage;
+    return allBlocks.slice(startIndex, endIndex);
+  };
+  
+  // Update blocks when page changes
+  useEffect(() => {
+    const currentBlocks = getCurrentPageBlocks();
+    setBlocks(currentBlocks);
+  }, [currentPage, allBlocks]);
   
   // Load blocks on initial render
   useEffect(() => {
-    const fetchBlocks = async () => {
+    fetchRealBlockchainData();
+  }, []); // Remove currentPage dependency to avoid infinite loop
+  
+  // Navigate to first page
+  const goToFirstPage = () => {
+    setCurrentPage(1);
+  };
+  
+  // Navigate to last page
+  const goToLastPage = () => {
+    setCurrentPage(totalPages);
+  };
+  
+  // Fetch real blockchain data
+  const fetchRealBlockchainData = async () => {
+    let chainResult = null; // Declare outside try block
+    
+    try {
+      setLoading(true);
+      setError(null); // Clear previous errors
+      
+      // Basic connectivity check
       try {
-        setLoading(true);
-        // In a real app, this would be an API call
-        // Simulate API delay
-        setTimeout(() => {
-          const mockBlocks = generateMockBlocks(20);
-          setBlocks(mockBlocks);
-          setTotalPages(5); // Mock 5 pages of results
-          setLoading(false);
-        }, 1000);
-      } catch (error) {
-        console.error('Error fetching blocks:', error);
+        const testResponse = await fetch('http://localhost:5002/api/node-info');
+        if (!testResponse.ok) {
+          throw new Error(`HTTP ${testResponse.status}: ${testResponse.statusText}`);
+        }
+        console.log('✅ Basic connectivity test passed');
+      } catch (connectError) {
+        console.error('❌ Connectivity test failed:', connectError);
+        throw new Error(`Cannot connect to blockchain server: ${connectError.message}`);
+      }
+      
+      // Get chain data to get all blocks
+      chainResult = await ztaccApiService.getChain();
+      
+      // Handle different possible response structures
+      let chainData = null;
+      if (chainResult.success && chainResult.chain) {
+        chainData = chainResult.chain;
+      } else if (chainResult.chain) {
+        // Direct chain array response
+        chainData = chainResult.chain;
+      } else if (Array.isArray(chainResult)) {
+        // Direct array response
+        chainData = chainResult;
+      } else {
+        console.error('Invalid API response structure:', chainResult);
+        throw new Error('Invalid API response structure');
+      }
+      
+      if (chainData && chainData.length > 0) {
+        // Take only the most recent blocks to avoid duplicate timestamp issues
+        // Start from the end of the chain (most recent) and work backwards
+        const recentBlocks = chainData.slice(-50); // Get last 50 blocks
+        
+        // Process blocks data
+        const realBlocks = recentBlocks.map(block => {
+          if (!block) return null;
+          
+          // Calculate block size (if available)
+          const blockSize = block.size || Math.floor(Math.random() * 1000) + 500;
+          
+          // Calculate total fees from transactions in this block
+          const totalFees = block.transactions && block.transactions.length > 0 
+            ? block.transactions.reduce((sum, tx) => sum + (tx.fee_ztac || 0), 0)
+            : 0;
+          
+          // Format timestamp - handle Unix timestamp format
+          let timestamp;
+          if (block.timestamp) {
+            // Check if timestamp is already a Date object
+            if (block.timestamp instanceof Date) {
+              timestamp = block.timestamp;
+            } else if (typeof block.timestamp === 'number') {
+              // Unix timestamp (seconds since epoch)
+              timestamp = new Date(block.timestamp * 1000);
+            } else {
+              // Try to parse as string
+              timestamp = new Date(block.timestamp);
+            }
+          } else {
+            timestamp = new Date();
+          }
+          
+          return {
+            number: block.index,
+            hash: block.hash,
+            timestamp: timestamp,
+            transactionCount: block.transactions ? block.transactions.length : 0,
+            size: blockSize,
+            gasUsed: totalFees * 1000000, // Convert to gas units for display
+            gasLimit: 10000000, // Default gas limit
+            validator: block.validator || block.validator_address || block.miner || block.block_producer || 'Unknown',
+            reward: block.block_reward || 0,
+            totalFees: totalFees,
+            rawBlock: block // Keep original data for reference
+          };
+        }).filter(block => block !== null);
+        
+        // Sort by block number in descending order to ensure most recent first
+        const sortedBlocks = realBlocks.sort((a, b) => b.number - a.number);
+        
+        setAllBlocks(sortedBlocks); // Store all blocks
+        setTotalPages(Math.ceil(sortedBlocks.length / blocksPerPage)); // Calculate total pages
+        setLoading(false);
+      } else {
+        console.warn('No blockchain data available, using fallback data');
+        setError('No blockchain data available.');
+        // Fallback to mock data if API fails
+        const mockBlocks = generateMockBlocks(20);
+        setAllBlocks(mockBlocks); // Store all blocks
+        setTotalPages(5);
         setLoading(false);
       }
-    };
-    
-    fetchBlocks();
-  }, [currentPage]);
+    } catch (error) {
+      console.error('Failed to fetch blockchain data:', error.message);
+      setError(`Failed to connect to blockchain data source: ${error.message}`);
+      // Fallback to mock data on error
+      const mockBlocks = generateMockBlocks(20);
+      setAllBlocks(mockBlocks); // Store all blocks
+      setTotalPages(5);
+      setLoading(false);
+    }
+  };
   
   // Handle refresh
   const handleRefresh = () => {
     setIsRefreshing(true);
-    const mockBlocks = generateMockBlocks(20);
-    
-    setTimeout(() => {
-      setBlocks(mockBlocks);
+    fetchRealBlockchainData().finally(() => {
       setIsRefreshing(false);
-    }, 1000);
+    });
   };
   
   // Handle search submit
@@ -99,27 +219,38 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
     const now = new Date();
     const secondsAgo = Math.floor((now - date) / 1000);
     
-    if (secondsAgo < 60) {
-      return `${secondsAgo} sec${secondsAgo !== 1 ? 's' : ''} ago`;
+    if (secondsAgo < 1) {
+      return 'Just now';
+    } else if (secondsAgo < 60) {
+      return `${secondsAgo} sec${secondsAgo === 1 ? '' : 's'} ago`;
+    } else if (secondsAgo < 3600) {
+      const minutesAgo = Math.floor(secondsAgo / 60);
+      return `${minutesAgo} min${minutesAgo === 1 ? '' : 's'} ago`;
+    } else if (secondsAgo < 86400) {
+      const hoursAgo = Math.floor(secondsAgo / 3600);
+      return `${hoursAgo} hour${hoursAgo === 1 ? '' : 's'} ago`;
+    } else {
+      const daysAgo = Math.floor(secondsAgo / 86400);
+      return `${daysAgo} day${daysAgo === 1 ? '' : 's'} ago`;
     }
-    
-    const minutesAgo = Math.floor(secondsAgo / 60);
-    if (minutesAgo < 60) {
-      return `${minutesAgo} min${minutesAgo !== 1 ? 's' : ''} ago`;
-    }
-    
-    const hoursAgo = Math.floor(minutesAgo / 60);
-    if (hoursAgo < 24) {
-      return `${hoursAgo} hour${hoursAgo !== 1 ? 's' : ''} ago`;
-    }
-    
-    return date.toLocaleString();
   };
   
-  // Format address
+  // Format address for display
   const formatAddress = (address) => {
-    if (!address) return '';
+    if (!address) return 'Unknown';
+    if (address.length <= 10) return address;
     return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
+  };
+  
+  // Format block size
+  const formatBlockSize = (sizeInBytes) => {
+    if (sizeInBytes < 1024) {
+      return `${sizeInBytes} B`;
+    } else if (sizeInBytes < 1024 * 1024) {
+      return `${(sizeInBytes / 1024).toFixed(1)} KB`;
+    } else {
+      return `${(sizeInBytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
   };
   
   return (
@@ -132,15 +263,19 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
       title="Blocks"
     >
       <div className="container mx-auto px-4 py-6">
-        {/* Header */}
+        {/* Page Header */}
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-2 flex items-center">
-            <Layers className="mr-2" size={24} />
-            Blocks
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            Browse and search recent blocks on the Zero-Trust Access Control Chain
-          </p>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900 dark:text-white flex items-center">
+                <Layers className="mr-3 h-8 w-8" />
+                Blocks
+              </h1>
+              <p className="text-gray-600 dark:text-gray-400 mt-2">
+                Browse and search recent blocks on the Zero-Trust Access Control Chain
+              </p>
+            </div>
+          </div>
         </div>
         
         {/* Search and Filter Bar */}
@@ -191,6 +326,20 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
             <div className="flex justify-center items-center h-64">
               <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
             </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center h-64 text-red-500">
+              <Database size={48} className="mb-4" />
+              <p className="text-lg font-semibold mb-2">{error}</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Please check your connection or try again later.
+              </p>
+              <button
+                onClick={fetchRealBlockchainData}
+                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
           ) : (
             <>
               <div className="overflow-x-auto">
@@ -205,9 +354,6 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                         Txns
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                        Access Events
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                         Validator
@@ -250,19 +396,14 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                           {block.transactionCount}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
-                            {block.accessEvents}
-                          </span>
-                        </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600 dark:text-blue-400">
                           {formatAddress(block.validator)}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {block.size} KB
+                          {formatBlockSize(block.size)}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {Math.floor(block.gasUsed / 1000000)}M ({Math.round((block.gasUsed / block.gasLimit) * 100)}%)
+                          {block.totalFees} ZTACC
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                           <button
@@ -284,9 +425,20 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
               {/* Pagination */}
               <div className="flex justify-between items-center px-6 py-3 border-t border-gray-200 dark:border-gray-700">
                 <div className="text-sm text-gray-500 dark:text-gray-400">
-                  Showing blocks {blocks[0]?.number} to {blocks[blocks.length - 1]?.number}
+                  {blocks.length > 0 ? (
+                    `Showing blocks ${blocks[blocks.length - 1]?.number} to ${blocks[0]?.number}`
+                  ) : (
+                    'No blocks to display'
+                  )}
                 </div>
                 <div className="flex space-x-2">
+                  <button
+                    onClick={goToFirstPage}
+                    disabled={currentPage === 1}
+                    className="flex items-center px-3 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
+                  >
+                    First
+                  </button>
                   <button
                     onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                     disabled={currentPage === 1}
@@ -300,7 +452,7 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
                     Prev
                   </button>
                   <span className="px-3 py-1 bg-blue-600 text-white rounded-md">
-                    {currentPage}
+                    {currentPage} of {totalPages}
                   </span>
                   <button
                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -313,6 +465,13 @@ const BlocksPage = ({ darkMode = false, toggleDarkMode, sidebarOpen = false, tog
                   >
                     Next
                     <ChevronRight size={16} className="ml-1" />
+                  </button>
+                  <button
+                    onClick={goToLastPage}
+                    disabled={currentPage === totalPages}
+                    className="flex items-center px-3 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
+                  >
+                    Last
                   </button>
                 </div>
               </div>
